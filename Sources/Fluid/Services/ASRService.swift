@@ -4100,6 +4100,67 @@ final class ASRService: ObservableObject {
         return (ASRTranscriptionResult(text: cleanedText, confidence: result.confidence), estimatedSamples)
     }
 
+    // MARK: - POC: detailed API transcription (raw text, word timings)
+
+    struct APIDetailedTranscription {
+        let text: String
+        let confidence: Float
+        let sampleCount: Int
+        let words: [ASRWordTiming]
+    }
+
+    /// POC for BinkServer: chunked file transcription with optional word timings (absolute seconds)
+    /// and an optional raw mode that skips filler removal, personal dictionary and spoken punctuation.
+    func transcribeDetailedForAPI(_ fileURL: URL, raw: Bool, wantWords: Bool) async throws -> APIDetailedTranscription {
+        let lease = try self.acquireExclusiveActivity(.localAPI)
+        defer { self.releaseExclusiveActivity(lease) }
+        guard FileManager.default.isReadableFile(atPath: fileURL.path) else {
+            throw NSError(domain: "ASRService", code: -3, userInfo: [NSLocalizedDescriptionKey: "Audio file is not readable."])
+        }
+        try await self.ensureAsrReady()
+        let provider = self.transcriptionProvider
+        guard provider.isReady else {
+            throw NSError(domain: "ASRService", code: -2, userInfo: [NSLocalizedDescriptionKey: "Transcription provider is not ready."])
+        }
+        let reader = try LocalAPIAudioDecoder.ChunkReader(fileURL: fileURL)
+        let outcome = try await transcriptionExecutor.run { [provider] () async throws -> APIDetailedTranscription in
+            var parts: [String] = []
+            var words: [ASRWordTiming] = []
+            var weighted = 0.0
+            var processed = 0
+            while true {
+                var samples = try await reader.nextSamples()
+                let count = samples.count
+                guard count > 0 else { break }
+                if count < 16_000 { samples.append(contentsOf: repeatElement(0.0, count: 16_000 - count)) }
+                let offset = TimeInterval(processed) / 16_000
+                if wantWords, provider.supportsWordTimings {
+                    let timed = try await provider.transcribeWithWordTimings(samples)
+                    if !timed.result.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { parts.append(timed.result.text) }
+                    words += timed.words.map { ASRWordTiming(text: $0.text, start: $0.start + offset, end: $0.end + offset) }
+                    weighted += Double(timed.result.confidence) * Double(count)
+                } else {
+                    let result = try await provider.transcribeFinal(samples)
+                    if !result.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { parts.append(result.text) }
+                    weighted += Double(result.confidence) * Double(count)
+                }
+                processed += count
+            }
+            let confidence = processed > 0 ? Float(weighted / Double(processed)) : 0
+            return APIDetailedTranscription(text: parts.joined(separator: " "), confidence: confidence, sampleCount: processed, words: words)
+        }
+        if !self.hasCompletedFirstTranscription {
+            self.hasCompletedFirstTranscription = true
+            self.isLoadingModel = false
+            self.modelPreparationPhase = nil
+        }
+        if raw { return outcome }
+        let cleaned = ASRService.applySpokenPunctuationFormatting(
+            ASRService.applyCustomDictionary(ASRService.removeFillerWords(outcome.text))
+        )
+        return APIDetailedTranscription(text: cleaned, confidence: outcome.confidence, sampleCount: outcome.sampleCount, words: outcome.words)
+    }
+
     // MARK: - Exclusive model residency
 
     func meetingResidencyParticipant() -> MeetingModelParticipant {

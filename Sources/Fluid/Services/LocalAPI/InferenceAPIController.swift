@@ -17,6 +17,20 @@ final class InferenceAPIController: LocalAPIRouteHandler {
         let confidence: Float
         let sampleCount: Int
         let provider: String
+        var words: [WordBody]?
+        var segments: [SegmentBody]?
+    }
+
+    struct WordBody: Encodable {
+        let text: String
+        let start: Double
+        let end: Double
+    }
+
+    struct SegmentBody: Encodable {
+        let text: String
+        let start: Double
+        let end: Double
     }
 
     struct PostprocessResponse: Encodable {
@@ -43,21 +57,63 @@ final class InferenceAPIController: LocalAPIRouteHandler {
     private func transcribe(_ request: LocalAPI.Request) async -> LocalAPI.Response {
         do {
             if let fileURL = try self.decodeFilePath(from: request) {
-                return try await self.transcribeFile(fileURL)
+                return try await self.transcribeFile(fileURL, request: request)
             }
 
             let temporaryFileURL = try await self.decodeUploadedAudioFile(from: request)
             do {
-                let response = try await self.transcribeFile(temporaryFileURL)
+                let response = try await self.transcribeFile(temporaryFileURL, request: request)
                 await LocalAPIAudioDecoder.removeTemporaryFile(at: temporaryFileURL)
                 return response
             } catch {
                 await LocalAPIAudioDecoder.removeTemporaryFile(at: temporaryFileURL)
                 throw error
             }
+        } catch let error as ASRActivityError {
+            // POC: a client can tell "busy" (503) from "bad request" (400).
+            return LocalAPI.error("busy: \(error.localizedDescription)", status: 503)
         } catch {
             return LocalAPI.error(error.localizedDescription, status: 400)
         }
+    }
+
+    private func flag(_ request: LocalAPI.Request, _ name: String) -> Bool {
+        ["1", "true", "yes"].contains(request.query[name]?.lowercased() ?? "")
+    }
+
+    /// Sentence-ish segments from word timings: split at sentence-final punctuation or a pause of 0.8 s.
+    private static func segments(from words: [ASRWordTiming]) -> [SegmentBody] {
+        var result: [SegmentBody] = []
+        var current: [ASRWordTiming] = []
+        func close() {
+            guard let first = current.first, let last = current.last else { return }
+            result.append(SegmentBody(text: current.map(\.text).joined(separator: " "), start: first.start, end: last.end))
+            current = []
+        }
+        for word in words {
+            if let last = current.last, word.start - last.end > 0.8 { close() }
+            current.append(word)
+            if let ch = word.text.last, ".?!".contains(ch) { close() }
+        }
+        close()
+        return result
+    }
+
+    private func transcribeFile(_ fileURL: URL, request: LocalAPI.Request) async throws -> LocalAPI.Response {
+        let raw = self.flag(request, "raw")
+        let wantWords = self.flag(request, "words") || self.flag(request, "segments")
+        guard raw || wantWords else { return try await self.transcribeFile(fileURL) }
+        let detailed = try await AppServices.shared.asr.transcribeDetailedForAPI(fileURL, raw: raw, wantWords: wantWords)
+        return LocalAPI.json(
+            TranscribeResponse(
+                text: detailed.text,
+                confidence: detailed.confidence,
+                sampleCount: detailed.sampleCount,
+                provider: SettingsStore.shared.selectedSpeechModel.displayName,
+                words: self.flag(request, "words") ? detailed.words.map { WordBody(text: $0.text, start: $0.start, end: $0.end) } : nil,
+                segments: self.flag(request, "segments") ? Self.segments(from: detailed.words) : nil
+            )
+        )
     }
 
     private func transcribeFile(_ fileURL: URL) async throws -> LocalAPI.Response {
