@@ -3,6 +3,7 @@
 This fork carries a few changes on top of [altic-dev/FluidVoice](https://github.com/altic-dev/FluidVoice) on branch `bink/transcribe-api`:
 
 - `POST /v1/transcribe` accepts `raw`, `words` and `segments` query options and returns `503` while the model is busy dictating.
+  `raw=1` returns the model's own output: no vocabulary boosting, no pronunciation corrections (dictionary voice profiles), no filler-word removal and no custom-dictionary replacements. Word timings therefore always line up with the text, also when dictation uses corrections.
 - The local API only answers requests whose `Host` header is `127.0.0.1`, `localhost` or `[::1]` (with or without the port). Anything else gets `403`, so web pages cannot reach the API through DNS rebinding.
 
 ## Build and run

@@ -4134,16 +4134,20 @@ final class ASRService: ObservableObject {
                 guard count > 0 else { break }
                 if count < 16_000 { samples.append(contentsOf: repeatElement(0.0, count: 16_000 - count)) }
                 let offset = TimeInterval(processed) / 16_000
-                if wantWords, provider.supportsWordTimings {
-                    let timed = try await provider.transcribeWithWordTimings(samples)
-                    if !timed.result.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { parts.append(timed.result.text) }
-                    words += timed.words.map { ASRWordTiming(text: $0.text, start: $0.start + offset, end: $0.end + offset) }
-                    weighted += Double(timed.result.confidence) * Double(count)
+                // raw: the model's own output (no boosting, no pronunciation corrections), timings always valid
+                let timed: (result: ASRTranscriptionResult, words: [ASRWordTiming])
+                if raw {
+                    timed = try await provider.transcribeRaw(samples)
+                } else if wantWords, provider.supportsWordTimings {
+                    timed = try await provider.transcribeWithWordTimings(samples)
                 } else {
-                    let result = try await provider.transcribeFinal(samples)
-                    if !result.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { parts.append(result.text) }
-                    weighted += Double(result.confidence) * Double(count)
+                    timed = try (await provider.transcribeFinal(samples), [])
                 }
+                if !timed.result.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { parts.append(timed.result.text) }
+                if wantWords {
+                    words += timed.words.map { ASRWordTiming(text: $0.text, start: $0.start + offset, end: $0.end + offset) }
+                }
+                weighted += Double(timed.result.confidence) * Double(count)
                 processed += count
             }
             let confidence = processed > 0 ? Float(weighted / Double(processed)) : 0

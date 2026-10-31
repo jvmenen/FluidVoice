@@ -865,6 +865,28 @@ final class FluidAudioProvider: TranscriptionProvider {
         }
     }
 
+    /// Local API `raw`: the streaming manager carries no vocabulary boosting, and pronunciation
+    /// customization stays off, so the text is the model's own and the timings line up with it.
+    func transcribeRaw(_ samples: [Float]) async throws -> (result: ASRTranscriptionResult, words: [ASRWordTiming]) {
+        guard let manager = self.streamingAsrManager else {
+            throw NSError(
+                domain: "FluidAudioProvider",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "ASR manager not initialized"]
+            )
+        }
+        await manager.setPronunciationCustomizationEnabled(false)
+        let result = try await manager.transcribe(samples, source: AudioSource.microphone)
+        return (
+            ASRTranscriptionResult(
+                text: result.text,
+                confidence: result.confidence,
+                parakeetProcessingDurationMilliseconds: Self.parakeetProcessingMilliseconds(for: result)
+            ),
+            Self.makeWordTimings(from: result.tokenTimings ?? [])
+        )
+    }
+
     func transcribeFinal(_ samples: [Float]) async throws -> ASRTranscriptionResult {
         let generation = self.recordingGeneration
         try await self.refreshAutomaticPronunciationProfiles(warmReferences: false)

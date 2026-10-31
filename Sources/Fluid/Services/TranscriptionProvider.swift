@@ -176,6 +176,10 @@ protocol TranscriptionProvider {
 
     func transcribeWithWordTimings(_ samples: [Float]) async throws -> (result: ASRTranscriptionResult, words: [ASRWordTiming])
 
+    /// The model's own output for the local API's `raw` option: no vocabulary boosting and no
+    /// pronunciation corrections, so the word timings always describe the returned text.
+    func transcribeRaw(_ samples: [Float]) async throws -> (result: ASRTranscriptionResult, words: [ASRWordTiming])
+
     /// Whether this provider prefers to handle long-form file transcription itself.
     /// This is useful when the backend already has model-native long-audio chunking/reassembly.
     var prefersNativeFileTranscription: Bool { get }
@@ -204,6 +208,11 @@ extension TranscriptionProvider {
 
     func transcribeWithWordTimings(_ samples: [Float]) async throws -> (result: ASRTranscriptionResult, words: [ASRWordTiming]) {
         try (await self.transcribe(samples), [])
+    }
+
+    /// Providers without boosting or pronunciation corrections already return the model's own output.
+    func transcribeRaw(_ samples: [Float]) async throws -> (result: ASRTranscriptionResult, words: [ASRWordTiming]) {
+        try await self.transcribeWithWordTimings(samples)
     }
 
     func transcribeStreaming(_ samples: [Float]) async throws -> ASRTranscriptionResult {
